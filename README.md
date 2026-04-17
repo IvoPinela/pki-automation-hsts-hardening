@@ -56,6 +56,7 @@ PROJETO_PKI/
     │       ├── fullchain.crt   # Cópia do certificado em produção
     │       └── server.key      # Cópia da chave em produção
 
+```
 
 ## 4. Análise Técnica dos Componentes
 
