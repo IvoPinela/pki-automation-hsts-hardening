@@ -1,61 +1,63 @@
-import os
-from datetime import datetime, timedelta, timezone
+from __future__ import annotations
+
+import argparse
+from datetime import timedelta
+
 from cryptography import x509
-from cryptography.x509.oid import NameOID
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
-# --- CONFIGURAÇÕES DE CAMINHOS ---
-ROOT_DIR = "offline_root"
-INT_DIR = "online_intermediate"
+from common import (
+    INTERMEDIATE_CERT_PATH,
+    INTERMEDIATE_KEY_PATH,
+    ROOT_CERT_PATH,
+    ROOT_KEY_PATH,
+    PKIError,
+    build_aia,
+    build_crl_distribution_points,
+    default_ca_issuer_urls,
+    default_crl_urls,
+    ensure_runtime_directories,
+    now_utc,
+    resolve_password,
+    serialize_certificate,
+    serialize_private_key,
+    write_bytes,
+)
 
-def generate_private_key(key_size=4096):
-    """Gera uma chave RSA forte."""
-    return rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=key_size
-    )
 
-def save_pem(data, path):
-    """Guarda dados em formato PEM no disco."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(data)
+def generate_private_key(key_size: int) -> rsa.RSAPrivateKey:
+    return rsa.generate_private_key(public_exponent=65537, key_size=key_size)
 
-def create_root_ca():
-    """Cria a Root CA (Âncora de Confiança)."""
-    print("Generating Root CA...")
-    
-    # 1. Chave Privada
-    key = generate_private_key()
-    
-    # 2. Identidade (Subject e Issuer são iguais na Root)
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "PT"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Lisboa"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Cybersecurity Master Project"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "Offline Root CA"),
+
+def build_name(country: str, state: str, organization: str, common_name: str) -> x509.Name:
+    return x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, country),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, state),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, organization),
+        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
     ])
 
-    # 3. Construção do Certificado
-    cert = x509.CertificateBuilder().subject_name(
-        subject
-    ).issuer_name(
-        issuer
-    ).public_key(
-        key.public_key()
-    ).serial_number(
-        x509.random_serial_number()
-    ).not_valid_before(
-        datetime.now(timezone.utc)
-    ).not_valid_after(
-        datetime.now(timezone.utc) + timedelta(days=3650)  # 10 Anos
-    ).add_extension(
-        # CRÍTICO: Define que este certificado é uma CA
-        x509.BasicConstraints(ca=True, path_length=None), critical=True,
-    ).add_extension(
-        # Define o uso da chave (Assinar certificados e CRLs)
-        x509.KeyUsage(
+
+def create_root_ca(args: argparse.Namespace, password: bytes | None):
+    root_key = generate_private_key(args.root_key_size)
+    subject = build_name(args.country, args.state, args.organization, args.root_common_name)
+    not_before = now_utc()
+    not_after = not_before + timedelta(days=args.root_valid_days)
+    root_crl_urls, _ = default_crl_urls(args.base_domain)
+    _, root_aia_urls = default_ca_issuer_urls(args.base_domain)
+
+    root_cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(root_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+        .add_extension(x509.KeyUsage(
             digital_signature=False,
             content_commitment=False,
             key_encipherment=False,
@@ -65,54 +67,37 @@ def create_root_ca():
             crl_sign=True,
             encipher_only=False,
             decipher_only=False,
-        ), critical=True,
-    ).sign(key, hashes.SHA256())
-
-    # 4. Serialização e Escrita
-    key_pem = key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=serialization.NoEncryption() # Em prod, usaria password
+        ), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(root_key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key()), critical=False)
+        .add_extension(build_crl_distribution_points(root_crl_urls), critical=False)
+        .add_extension(build_aia(root_aia_urls), critical=False)
+        .sign(root_key, hashes.SHA256())
     )
-    
-    save_pem(key_pem, f"{ROOT_DIR}/private/root.key")
-    save_pem(cert.public_bytes(serialization.Encoding.PEM), f"{ROOT_DIR}/certs/root.crt")
-    
-    return key, cert
 
-def create_intermediate_ca(root_key, root_cert):
-    """Cria a Intermediate CA assinada pela Root."""
-    print("Generating Intermediate CA...")
-    
-    # 1. Chave da Intermediate
-    int_key = generate_private_key()
-    
-    # 2. Identidade
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "PT"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Cybersecurity Master Project"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "Online Issuing CA"),
-    ])
+    write_bytes(ROOT_KEY_PATH, serialize_private_key(root_key, password), private=True)
+    write_bytes(ROOT_CERT_PATH, serialize_certificate(root_cert))
+    return root_key, root_cert
 
-    # 3. Construção do Certificado Assinado pela Root
-    int_cert = x509.CertificateBuilder().subject_name(
-        subject
-    ).issuer_name(
-        root_cert.subject # O emissor é a Root
-    ).public_key(
-        int_key.public_key()
-    ).serial_number(
-        x509.random_serial_number()
-    ).not_valid_before(
-        datetime.now(timezone.utc)
-    ).not_valid_after(
-        datetime.now(timezone.utc) + timedelta(days=1825) # 5 Anos
-    ).add_extension(
-        # CRÍTICO: path_length=0 significa que esta CA pode assinar sites, 
-        # mas não pode criar outras CAs abaixo dela. Excelente para o mestrado.
-        x509.BasicConstraints(ca=True, path_length=0), critical=True,
-    ).add_extension(
-        x509.KeyUsage(
+
+def create_intermediate_ca(args: argparse.Namespace, root_key, root_cert, password: bytes | None):
+    intermediate_key = generate_private_key(args.intermediate_key_size)
+    subject = build_name(args.country, args.state, args.organization, args.intermediate_common_name)
+    not_before = now_utc()
+    not_after = not_before + timedelta(days=args.intermediate_valid_days)
+    _, intermediate_crl_urls = default_crl_urls(args.base_domain)
+    _, intermediate_aia_urls = default_ca_issuer_urls(args.base_domain)
+
+    intermediate_cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(root_cert.subject)
+        .public_key(intermediate_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(x509.KeyUsage(
             digital_signature=False,
             content_commitment=False,
             key_encipherment=False,
@@ -122,32 +107,65 @@ def create_intermediate_ca(root_key, root_cert):
             crl_sign=True,
             encipher_only=False,
             decipher_only=False,
-        ), critical=True,
-    ).sign(root_key, hashes.SHA256())
-
-    # 4. Guardar Ficheiros
-    key_pem = int_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=serialization.NoEncryption()
+        ), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(intermediate_key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key()), critical=False)
+        .add_extension(build_crl_distribution_points(intermediate_crl_urls), critical=False)
+        .add_extension(build_aia(intermediate_aia_urls), critical=False)
+        .sign(root_key, hashes.SHA256())
     )
-    
-    save_pem(key_pem, f"{INT_DIR}/private/intermediate.key")
-    save_pem(int_cert.public_bytes(serialization.Encoding.PEM), f"{INT_DIR}/certs/intermediate.crt")
-    
-    return int_key, int_cert
 
-if __name__ == "__main__":
+    write_bytes(INTERMEDIATE_KEY_PATH, serialize_private_key(intermediate_key, password), private=True)
+    write_bytes(INTERMEDIATE_CERT_PATH, serialize_certificate(intermediate_cert))
+    return intermediate_key, intermediate_cert
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='Gera uma Root CA e uma Intermediate CA para laboratório.')
+    parser.add_argument('--country', default='PT')
+    parser.add_argument('--state', default='Lisboa')
+    parser.add_argument('--organization', default='Cybersecurity Master Project')
+    parser.add_argument('--root-common-name', default='Offline Root CA')
+    parser.add_argument('--intermediate-common-name', default='Online Issuing CA')
+    parser.add_argument('--root-key-size', type=int, default=4096)
+    parser.add_argument('--intermediate-key-size', type=int, default=4096)
+    parser.add_argument('--root-valid-days', type=int, default=3650)
+    parser.add_argument('--intermediate-valid-days', type=int, default=1825)
+    parser.add_argument('--base-domain', default='cyber.local')
+    parser.add_argument('--root-password')
+    parser.add_argument('--root-password-env')
+    parser.add_argument('--root-allow-unencrypted', action='store_true')
+    parser.add_argument('--intermediate-password')
+    parser.add_argument('--intermediate-password-env')
+    parser.add_argument('--intermediate-allow-unencrypted', action='store_true')
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    ensure_runtime_directories()
     try:
-        # Gerar a Hierarquia
-        r_key, r_cert = create_root_ca()
-        i_key, i_cert = create_intermediate_ca(r_key, r_cert)
-        
-        print("-" * 30)
-        print("✅ PKI Base criada com sucesso!")
-        print(f"📍 Root em: {ROOT_DIR}")
-        print(f"📍 Intermediate em: {INT_DIR}")
-        print("-" * 30)
-        
-    except Exception as e:
-        print(f"❌ Erro durante a geração: {e}")
+        root_password = resolve_password(password=args.root_password, password_env=args.root_password_env, prompt_label='a Root CA', allow_unencrypted=args.root_allow_unencrypted)
+        intermediate_password = resolve_password(password=args.intermediate_password, password_env=args.intermediate_password_env, prompt_label='a Intermediate CA', allow_unencrypted=args.intermediate_allow_unencrypted)
+        root_key, root_cert = create_root_ca(args, root_password)
+        _, intermediate_cert = create_intermediate_ca(args, root_key, root_cert, intermediate_password)
+        print('-' * 60)
+        print('✅ Hierarquia PKI criada com sucesso')
+        print(f'Root key: {ROOT_KEY_PATH}')
+        print(f'Root cert: {ROOT_CERT_PATH}')
+        print(f'Intermediate key: {INTERMEDIATE_KEY_PATH}')
+        print(f'Intermediate cert: {INTERMEDIATE_CERT_PATH}')
+        print(f'Root subject: {root_cert.subject.rfc4514_string()}')
+        print(f'Intermediate subject: {intermediate_cert.subject.rfc4514_string()}')
+        print('-' * 60)
+        return 0
+    except PKIError as exc:
+        print(f'❌ Erro de configuração: {exc}')
+        return 1
+    except Exception as exc:
+        print(f'❌ Erro inesperado: {exc}')
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

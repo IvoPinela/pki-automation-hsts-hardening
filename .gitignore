@@ -1,0 +1,32 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+.env
+
+# Generated PKI artifacts
+pki_project/offline_root/certs/*
+!pki_project/offline_root/certs/README.md
+pki_project/offline_root/private/*
+!pki_project/offline_root/private/README.md
+pki_project/offline_root/crl/*
+!pki_project/offline_root/crl/README.md
+
+pki_project/online_intermediate/certs/*
+!pki_project/online_intermediate/certs/README.md
+pki_project/online_intermediate/private/*
+!pki_project/online_intermediate/private/README.md
+pki_project/online_intermediate/csr/*
+!pki_project/online_intermediate/csr/README.md
+pki_project/online_intermediate/crl/*
+!pki_project/online_intermediate/crl/README.md
+
+pki_project/web_server/certs/*
+!pki_project/web_server/certs/README.md
+pki_project/web_server/private/*
+!pki_project/web_server/private/README.md

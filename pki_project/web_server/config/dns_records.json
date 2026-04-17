@@ -1,0 +1,7 @@
+{
+  "ttl": 60,
+  "records": {
+    "app.cyber.local": "127.0.0.1",
+    "www.app.cyber.local": "127.0.0.1"
+  }
+}
